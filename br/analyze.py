@@ -74,6 +74,20 @@ class Maps:
             self._ident = self._load("ident.bin")
         return self._ident
 
+    @property
+    def rel(self):
+        """Comparison relations and table-key reads per test (tools/build_rel.py), or None."""
+        if not hasattr(self, "_rel"):
+            r = None
+            try:
+                r = self._load("rel.bin")
+                if r.get("ids") != self.meta["ids"]:
+                    r = None   # built for another test list: never narrow with it
+            except Exception:
+                r = None
+            self._rel = r
+        return self._rel
+
     def bit(self, name):
         i = self.pseudo.get(name)
         return 0 if i is None else 1 << i
@@ -314,6 +328,85 @@ def diff_python(old, new, edits=None, key=None):
     return R
 
 
+# --------------------------------------------------------------------------- comparison flips
+# Truth of each ordering operator by how the operands related.
+_ORD = {"Lt": (1, 0, 0), "LtE": (1, 1, 0), "Gt": (0, 0, 1), "GtE": (0, 1, 1)}
+_EXEC, _ISNEQ, _EQ, _LT, _GT, _ERR = 1, 2, 4, 8, 16, 32
+
+
+def _flip_flags(old_op, new_op):
+    """Relation flags under which the two operators can disagree, or None if unknown."""
+    pair = {old_op, new_op}
+    if pair == {"Is", "Eq"} or pair == {"IsNot", "NotEq"}:
+        return _ISNEQ | _ERR
+    if old_op in _ORD and new_op in _ORD:
+        f = _ERR
+        for bit, a, b in zip((_LT, _EQ, _GT), _ORD[old_op], _ORD[new_op]):
+            if a != b:
+                f |= bit
+        return f   # incomparable operands make every ordering operator False
+    return None
+
+
+def compare_flips(a, b, rel):
+    """If def a and def b differ only in comparison operators, [(site, flags)]; else None."""
+    import ast
+    na, nb = list(ast.walk(a)), list(ast.walk(b))
+    if len(na) != len(nb):
+        return None
+    out = []
+    for x, y in zip(na, nb):
+        if isinstance(x, ast.cmpop) and isinstance(y, ast.cmpop):
+            continue   # operator nodes: judged by their Compare below
+        if type(x) is not type(y):
+            return None
+        if isinstance(x, ast.Compare):
+            if len(x.ops) != len(y.ops):
+                return None
+            ox = [type(o).__name__ for o in x.ops]
+            oy = [type(o).__name__ for o in y.ops]
+            if ox != oy:
+                if len(ox) != 1:
+                    return None
+                f = _flip_flags(ox[0], oy[0])
+                if f is None:
+                    return None
+                out.append(("%s:%d:%d" % (rel, x.lineno, x.col_offset), f))
+        for name in x._fields:
+            vx, vy = getattr(x, name, None), getattr(y, name, None)
+            if isinstance(vx, list):
+                if not isinstance(vy, list) or len(vx) != len(vy):
+                    return None
+                for ex, ey in zip(vx, vy):
+                    if not isinstance(ex, ast.AST) and ex != ey:
+                        return None
+            elif not isinstance(vx, ast.AST) and name not in ("ctx",):
+                if isinstance(vy, ast.AST) or vx != vy:
+                    return None
+    return out
+
+
+def flip_filter(maps, rel, funcs):
+    """Mask of tests that may see a difference when the only edits are operator swaps
+    (untraced tests always may), or None when narrowing does not apply."""
+    R = maps.rel
+    if R is None or not funcs:
+        return None
+    sites = []
+    for a, b in funcs:
+        f = compare_flips(a, b, rel)
+        if not f:
+            return None
+        sites += f
+    m = ~R["covered"]
+    for site, flags in sites:
+        e = R["cmp"].get(site, {})
+        for bit, mask in e.items():
+            if bit & flags:
+                m |= mask
+    return m
+
+
 # --------------------------------------------------------------------------- plan
 class Plan:
     def __init__(self):
@@ -330,6 +423,14 @@ class Plan:
         self.wide = 0      # everything that runs the patched files: free idle-time insurance
         self.hint = set()  # words from patched paths, to order the run
         self.test_edit = set()
+
+
+def _func_lines(funcs):
+    out = set()
+    for a, _ in funcs:
+        start = min([a.lineno] + [d.lineno for d in a.decorator_list])
+        out.update(range(start, (a.end_lineno or a.lineno) + 1))
+    return out
 
 
 def _mod_of(rel):
@@ -431,7 +532,15 @@ def plan_commit(maps, text):
             pl.mask |= meta["reqmap"].get(mod, 0)
             pl.other |= meta["reqmap"].get(mod, 0)
             continue
-        pl.mask |= maps.lines(rel, R.lines)
+        lm = maps.lines(rel, R.lines)
+        if rel.startswith("sqlglot/") and not R.imp and not R.new_defs:
+            try:
+                ff = flip_filter(maps, rel, R.funcs)
+            except Exception:
+                ff = None
+            if ff is not None and R.lines <= _func_lines(R.funcs):
+                lm &= ff
+        pl.mask |= lm
         if R.lines:
             pl.rt[rel] = R.lines
         if in_tests:
@@ -468,7 +577,25 @@ def plan_commit(maps, text):
 
 
 # --------------------------------------------------------------------------- state users
-def users(maps, changes, info):
+def key_filter(maps, change, resized):
+    """Tests that may notice a change of some entries of a recorded table, or None."""
+    R = maps.rel
+    mn, q, attr, kind, entries = change
+    if R is None or kind != "value" or entries is None:
+        return None
+    tag = (mn, q, attr)
+    if tag not in R["wrapped"]:
+        return None
+    reads = R["keys"].get(tag, {})
+    m = ~R["covered"] | reads.get("*", 0)
+    if tag in resized:
+        m |= reads.get("#len", 0)
+    for e in entries:
+        m |= reads.get(e, 0)
+    return m
+
+
+def users(maps, changes, info, resized=()):
     """Tests that can notice the state changes reported by the child.
 
     info[(module, class)] = (inst key or None, {attr: [inst keys of expressions keyed by attr]})
@@ -521,5 +648,8 @@ def users(maps, changes, info):
                     m |= inst[hit]
                 if good:
                     base &= m
+        kf = key_filter(maps, (mn, q, attr, kind, entries), resized)
+        if kf is not None:
+            base &= kf
         out |= base
     return out

@@ -16,6 +16,15 @@ split them over workers.
    that ran that statement. An edit that runs at import time (class body,
    module level, signature) is passed to the state check. A data file selects
    the tests that open it. pytest configuration selects everything.
+2b. **Relations and table reads** (`maps/rel.bin`, built by `tools/build_rel.py`).
+   Every test is also run once with each single-operator comparison in sqlglot
+   compiled into a recorder (were the operands ever equal but not identical,
+   equal, less, greater?) and with module/class-level dicts and sets replaced by
+   subclasses that note which keys the test looked up. A patch that only swaps
+   comparison operators (`is`/`==`, `<`/`<=`, ...) keeps only tests that saw a
+   relation where the two operators disagree; a change to some entries of a
+   table keeps only tests that read those entries (or walked or sized the
+   table). Tests that could not be traced this way are never narrowed.
 3. **State check** (`br/state.py`). For import-time edits the patched package
    is re-imported in a forked child and every module global and class
    attribute is fingerprinted against the pinned state. Only tests that use a

@@ -202,7 +202,12 @@ def state_changes(R, plan, old, fails=()):
                                     exprs.setdefault(v.key, set()).add(
                                         v.__module__ + ":" + v.__qualname__)
             info[key][1][attr] = sorted(exprs.get(attr[:-4], ()))
-    return changes, users(maps, changes, info)
+    resized = set()
+    for mn, q, attr, kind, entries in changes:
+        a, b = base.get((mn, q, attr)), now.get((mn, q, attr))
+        if a and b and a[1] is not None and b[1] is not None and a[1].keys() != b[1].keys():
+            resized.add((mn, q, attr))
+    return changes, users(maps, changes, info, resized)
 
 
 def child_main(R, plan, w):
@@ -294,7 +299,8 @@ def child_main(R, plan, w):
     real = [i for i in bits(M) if i < N]
     if not real:
         return
-    alive = set(real)   # everything not proven to pass
+    kept = plan.keep & maps.REAL
+    alive = set(real) | set(bits(kept))   # everything not proven to pass, plus what is kept anyway
     use_real_duck = False
 
     def bound_alive(without=()):
@@ -386,7 +392,7 @@ def child_main(R, plan, w):
         shim.install(numpy=want_numpy and R.have_numpy)
 
     # ---- heavy tests: proofs and stand-ins -------------------------------
-    heavies = sorted([i for i in real if i in R.heavy], key=lambda i: -ms[i])
+    heavies = sorted([i for i in real if i in R.heavy and not (kept >> i) & 1], key=lambda i: -ms[i])
     digests = {}
 
     def tpc_plan(i):
@@ -454,7 +460,8 @@ def child_main(R, plan, w):
             send("p", h)
 
     # ---- cheap candidates -------------------------------------------------
-    cheap = [i for i in real if i not in R.heavy and not norun(i)]
+    # a test selected anyway (it reads a patched file) gains nothing from a run
+    cheap = [i for i in real if i not in R.heavy and not norun(i) and not (kept >> i) & 1]
     if not cheap:
         return
     cost = list(meta["cost"])
@@ -530,4 +537,5 @@ def child_main(R, plan, w):
             send("p", i)
         else:
             failed += 1
-    say("ran %d cheap, %d failed, %.2fs cpu total" % (ran, failed, time.process_time() - t_begin))
+    say("ran %d cheap, %d failed, %.2fs cpu total, est %.2f, run %.2f" % (
+        ran, failed, time.process_time() - t_begin, est, time.process_time() - t0))

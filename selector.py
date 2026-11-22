@@ -20,7 +20,7 @@ DATA = os.environ.get("BR_DATA", "/data")
 ROOT = os.path.realpath(os.environ.get("BR_SQLGLOT", "/opt/sqlglot"))
 MAPS = os.environ.get("BR_MAPS", os.path.join(HERE, "maps"))
 WALL = float(os.environ.get("BR_WALL", "150"))   # stop starting children after this
-PRICE_FUDGE = 1.15
+PRICE_FUDGE = 1.1
 
 
 def log(*a):
@@ -166,14 +166,18 @@ def solve(tests, cdir, commits, done):
             log(c, "config change: everything")
             emit(c, full)
             done.add(c)
-        elif not (pl.mask or pl.reimport or pl.swaps):
+        elif not ((pl.mask & maps.REAL) or pl.reimport):
+            # nothing left to check: a code swap alone has nothing to run
             log(c, "static: %d tests" % bin(pl.keep & maps.REAL).count("1"))
             out(c, pl.keep)
         else:
             dynamic.append(c)
     if not dynamic:
         return
-    price = PRICE_FUDGE * max(0.6, min(2.5, bench() / meta["bench"]))
+    # one CPU second here, in the reference machine's seconds the cost estimates use
+    price = PRICE_FUDGE * max(0.9, min(1.8, bench() / meta["bench"]))
+    if os.environ.get("BR_PRICE"):
+        price = float(os.environ["BR_PRICE"])
     from br.child import Runner
     R = Runner(maps, ms, price)
     log("warm parent ready, price %.2f, %d commits to check, %.2fs cpu" % (

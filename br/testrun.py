@@ -18,8 +18,10 @@ SPAWNED = [0]
 class InlinePool:
     """Runs submitted work in this process so patched code is what gets tested."""
 
-    def __init__(self, *a, **k):
-        pass
+    def __init__(self, *a, initializer=None, initargs=(), **k):
+        if initializer is not None:
+            # a real pool runs it in every worker, on pickled copies of the arguments
+            initializer(*pickle.loads(pickle.dumps(initargs)))
 
     def submit(self, fn, *a, **k):
         f = Future()
