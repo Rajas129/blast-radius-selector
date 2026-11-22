@@ -1,0 +1,9 @@
+sample
+output.jsonl
+run.log
+.git
+**/__pycache__
+README.md
+SCORING.md
+score.py
+Makefile
